@@ -157,6 +157,25 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
   // Ref to track autocomplete state for Monaco keyboard handler
   const autocompleteStateRef = useRef({ isOpen: false, selectedIndex: 0, suggestions: [] as CompletionItem[] });
 
+  // Add visualization type hints for Explore mode
+  const enhancedQuery = isExploreMode
+    ? {
+        ...query,
+        // Add metadata for Explore mode visualization hints
+        meta: {
+          ...query.meta,
+          preferredVisualisationType: 'graph' as const, // Default to graph for time series data
+          exploreMode: true,
+        },
+      }
+    : query;
+
+  // Keep a ref to the latest query to avoid stale closures in Monaco callbacks
+  const queryRef = useRef(enhancedQuery);
+  useEffect(() => {
+    queryRef.current = enhancedQuery;
+  }, [enhancedQuery]);
+
   // Ref to collect Monaco disposables for cleanup on unmount
   const disposablesRef = useRef<monacoType.IDisposable[]>([]);
 
@@ -201,7 +220,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
       const result = (response as any).data as { newQuery: string; newCursorPosition: number };
 
       // Update the query with the backend result, preserving Explore mode metadata
-      onChange({ ...enhancedQuery, queryText: result.newQuery });
+      onChange({ ...queryRef.current, queryText: result.newQuery });
 
       // Set cursor position after a delay to ensure React has updated
       setTimeout(() => {
@@ -359,7 +378,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
     const newCursorPos = start + insertValue.length;
 
     // Update the query, preserving Explore mode metadata
-    onChange({ ...enhancedQuery, queryText: newValue });
+    onChange({ ...queryRef.current, queryText: newValue });
 
     // Set focus back to editor with new cursor position after a slight delay
     // to ensure React has updated the DOM
@@ -401,7 +420,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
 
   const onQueryTextChange = (newValue: string) => {
     // Update the query state first, preserving Explore mode metadata
-    onChange({ ...enhancedQuery, queryText: newValue });
+    onChange({ ...queryRef.current, queryText: newValue });
 
     // Get cursor position AFTER the text change by using setTimeout
     // This ensures Monaco has updated its internal state
@@ -428,15 +447,15 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
   const onLegendModeChange = (option: SelectableValue<'auto' | 'custom'>) => {
     const newMode = option.value || 'auto';
     onChange({
-      ...enhancedQuery,
+      ...queryRef.current,
       legendMode: newMode,
       // Clear template when switching to auto
-      legendTemplate: newMode === 'auto' ? '' : enhancedQuery.legendTemplate || '',
+      legendTemplate: newMode === 'auto' ? '' : queryRef.current.legendTemplate || '',
     });
   };
 
   const onLegendTemplateChange = (event: ChangeEvent<HTMLInputElement>) => {
-    onChange({ ...enhancedQuery, legendTemplate: event.target.value });
+    onChange({ ...queryRef.current, legendTemplate: event.target.value });
   };
 
   const onLegendTemplateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -568,19 +587,6 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
 
   const { queryText, legendMode = 'auto', legendTemplate = '' } = query;
 
-  // Add visualization type hints for Explore mode
-  const enhancedQuery = isExploreMode
-    ? {
-        ...query,
-        // Add metadata for Explore mode visualization hints
-        meta: {
-          ...query.meta,
-          preferredVisualisationType: 'graph' as const, // Default to graph for time series data
-          exploreMode: true,
-        },
-      }
-    : query;
-
   return (
     <Stack gap={2} direction="column">
       {/* Query field with native Grafana styling */}
@@ -615,7 +621,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
               }}
               onSave={(value) => {
                 // Update query when user saves (Cmd+S), preserving Explore mode metadata
-                onChange({ ...enhancedQuery, queryText: value });
+                onChange({ ...queryRef.current, queryText: value });
               }}
               onChange={onQueryTextChange}
               onEditorDidMount={handleEditorDidMount}

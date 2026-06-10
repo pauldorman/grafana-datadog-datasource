@@ -35,6 +35,12 @@ export function LogsQueryEditor({ query, onChange, onRunQuery, datasource, ...re
   // Ref to track autocomplete state for Monaco keyboard handler
   const autocompleteStateRef = useRef({ isOpen: false, selectedIndex: 0, suggestions: [] as CompletionItem[] });
 
+  // Keep a ref to the latest query to avoid stale closures in Monaco callbacks
+  const queryRef = useRef(query);
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
+
   // Ref to collect Monaco disposables for cleanup on unmount
   const disposablesRef = useRef<monacoType.IDisposable[]>([]);
 
@@ -106,7 +112,7 @@ export function LogsQueryEditor({ query, onChange, onRunQuery, datasource, ...re
 
     // Update the logs query
     onChange({
-      ...query,
+      ...queryRef.current,
       logQuery: newValue,
       queryType: 'logs', // Ensure query type is set to logs
     });
@@ -151,7 +157,7 @@ export function LogsQueryEditor({ query, onChange, onRunQuery, datasource, ...re
 
     // Update the logs query state
     onChange({
-      ...query,
+      ...queryRef.current,
       logQuery: newValue,
       queryType: 'logs', // Ensure query type is set to logs
     });
@@ -358,7 +364,7 @@ export function LogsQueryEditor({ query, onChange, onRunQuery, datasource, ...re
               }}
               onSave={(value) => {
                 onChange({
-                  ...query,
+                  ...queryRef.current,
                   logQuery: value,
                   queryType: 'logs',
                 });
