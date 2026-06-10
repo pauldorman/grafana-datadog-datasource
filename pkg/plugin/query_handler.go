@@ -27,6 +27,9 @@ const (
 	// Note: logs-volume queries are also handled by LogsHandler since volume
 	// is calculated from log entries (no separate API call needed)
 	LogsQueryType QueryType = "logs"
+
+	// CloudCostQueryType represents Datadog cloud cost queries
+	CloudCostQueryType QueryType = "cloud_cost"
 )
 
 // detectQueryType determines the query type based on the QueryModel
@@ -41,6 +44,8 @@ func detectQueryType(qm *QueryModel) QueryType {
 			return LogsQueryType
 		case "metrics":
 			return MetricsQueryType
+		case "cloud_cost":
+			return CloudCostQueryType
 		}
 	}
 	

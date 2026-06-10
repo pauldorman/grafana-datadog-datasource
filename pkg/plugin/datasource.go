@@ -653,6 +653,7 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 	// Note: LogsVolumeQueryType is handled by LogsHandler - volume is calculated from log entries
 	handlers := make(map[QueryType]QueryHandler)
 	handlers[MetricsQueryType] = NewMetricsHandler(d, req.Queries, ddCtx, metricsApi)
+	handlers[CloudCostQueryType] = NewMetricsHandler(d, req.Queries, ddCtx, metricsApi)
 	handlers[LogsQueryType] = NewLogsHandler(d, req.Queries, ddCtx)
 
 	// Parse all queries and route to appropriate handlers

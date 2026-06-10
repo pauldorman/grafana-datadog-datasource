@@ -104,11 +104,16 @@ func (h *MetricsHandler) processQuery(qm *QueryModel) error {
 			logger.Debug("Added 'by {*}' to query", "original", qm.QueryText, "modified", queryText)
 		}
 
+		dataSourceParams := datadogV2.METRICSDATASOURCE_METRICS
+		if qm.QueryType == "cloud_cost" {
+			dataSourceParams = datadogV2.METRICSDATASOURCE_CLOUD_COST
+		}
+
 		// Create query with name set to refID for formula referencing
 		queryName := refID
 		h.metricsQueries = append(h.metricsQueries, datadogV2.TimeseriesQuery{
 			MetricsTimeseriesQuery: &datadogV2.MetricsTimeseriesQuery{
-				DataSource: datadogV2.METRICSDATASOURCE_METRICS,
+				DataSource: dataSourceParams,
 				Query:      queryText,
 				Name:       &queryName,
 			},
