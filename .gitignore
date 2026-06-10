@@ -19,6 +19,9 @@ lib-cov
 # Coverage directory used by tools like istanbul
 coverage
 
+# ESLint cache
+.eslintcache
+
 # Compiled binary addons (https://nodejs.org/api/addons.html)
 dist/
 artifacts/
