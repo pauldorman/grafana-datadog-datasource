@@ -22,6 +22,9 @@ coverage
 # ESLint cache
 .eslintcache
 
+# Mage
+.bra.toml
+
 # Compiled binary addons (https://nodejs.org/api/addons.html)
 dist/
 artifacts/
