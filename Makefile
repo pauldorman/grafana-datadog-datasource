@@ -47,6 +47,7 @@ help:
 	@echo "Utility targets:"
 	@echo "  $(GREEN)install$(NC)               - Install frontend dependencies"
 	@echo "  $(GREEN)verify$(NC)                - Verify build artifacts"
+	@echo "  $(GREEN)teardown$(NC)              - Tear down Docker environment"
 	@echo "  $(GREEN)help$(NC)                  - Show this message"
 	@echo ""
 
@@ -71,6 +72,11 @@ clean:
 	@rm -rf $(DIST_DIR)
 	@mkdir -p $(DIST_DIR)
 	@echo "$(GREEN)✓ Cleaned$(NC)"
+
+teardown:
+	@echo "$(BLUE)Tearing down Docker environment and removing volumes...$(NC)"
+	@docker compose down -v
+	@echo "$(GREEN)✓ Docker environment cleaned$(NC)"
 
 ##############################################################################
 # Frontend Build
