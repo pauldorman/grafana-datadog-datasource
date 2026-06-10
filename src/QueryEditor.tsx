@@ -74,21 +74,23 @@ export function QueryEditor({ query, onChange, onRunQuery, datasource, ...restPr
   const theme = useTheme2();
 
   // Query type options
-  const queryTypeOptions: Array<SelectableValue<'metrics' | 'logs'>> = [
+  const queryTypeOptions: Array<SelectableValue<'metrics' | 'logs' | 'cloud_cost'>> = [
     { label: 'Metrics', value: 'metrics', description: 'Query Datadog metrics and time series data' },
     { label: 'Logs', value: 'logs', description: 'Search and analyze Datadog logs' },
+    { label: 'Cloud Cost', value: 'cloud_cost', description: 'Query Datadog cloud cost metrics' },
   ];
 
   // Get current query type, defaulting to 'metrics'
   const currentQueryType = query.queryType || 'metrics';
 
-  const onQueryTypeChange = (option: SelectableValue<'metrics' | 'logs'>) => {
+  const onQueryTypeChange = (option: SelectableValue<'metrics' | 'logs' | 'cloud_cost'>) => {
     const newQueryType = option.value || 'metrics';
     onChange({
       ...query,
       queryType: newQueryType,
       // Clear the other query field when switching types to avoid confusion
       ...(newQueryType === 'logs' ? { queryText: '' } : { logQuery: '' }),
+
     });
   };
 

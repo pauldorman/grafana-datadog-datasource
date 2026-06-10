@@ -25,7 +25,7 @@ export interface MyQuery extends DataQuery {
   // Query options
   interval?: number;   // Override interval in milliseconds
   // Logs query fields
-  queryType?: 'logs' | 'metrics'; // Query type - defaults to 'metrics'
+  queryType?: 'logs' | 'metrics' | 'cloud_cost'; // Query type - defaults to 'metrics'
   logQuery?: string;   // Logs search query
   indexes?: string[];  // Target log indexes
   // JSON parsing configuration
