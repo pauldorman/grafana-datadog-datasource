@@ -440,7 +440,10 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
       }
 
       // Trigger autocomplete with current query text and cursor position
-      autocomplete.onInput(newValue, cursorPos);
+      // Disable autocomplete for Cloud Cost queries
+      if (queryRef.current.queryType !== 'cloud_cost') {
+        autocomplete.onInput(newValue, cursorPos);
+      }
     }, 0);
   };
 
@@ -533,7 +536,8 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
     // Intercept keyboard events to handle autocomplete navigation
     const keyDownDisposable = editor.onKeyDown((e) => {
       // Only intercept if autocomplete is open (use ref to get current state)
-      if (!autocompleteStateRef.current.isOpen) {
+      // Also disable if we are in Cloud Cost mode
+      if (!autocompleteStateRef.current.isOpen || queryRef.current.queryType === 'cloud_cost') {
         return;
       }
 
@@ -648,7 +652,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
             />
 
             {/* Display validation error */}
-            {autocomplete.state.validationError && (
+            {query.queryType !== 'cloud_cost' && autocomplete.state.validationError && (
               <Alert title="Query Validation" severity="warning" style={{ marginTop: '8px' }}>
                 {autocomplete.state.validationError}
               </Alert>
@@ -676,14 +680,14 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
             )}
 
             {/* Display backend error */}
-            {autocomplete.state.error && (
+            {query.queryType !== 'cloud_cost' && autocomplete.state.error && (
               <Alert title="Autocomplete Error" severity="error" style={{ marginTop: '8px' }}>
                 {autocomplete.state.error}
               </Alert>
             )}
 
             {/* Autocomplete popup */}
-            {autocomplete.state.isOpen && autocomplete.state.suggestions.length > 0 && (
+            {query.queryType !== 'cloud_cost' && autocomplete.state.isOpen && autocomplete.state.suggestions.length > 0 && (
               <div
                 style={{
                   position: 'fixed',
@@ -822,7 +826,7 @@ function MetricsQueryEditor({ query, onChange, onRunQuery, datasource, app, ...r
       {showHelp && (
         <QueryEditorHelp
           onClickExample={(exampleQuery) => {
-            onChange({ ...query, ...exampleQuery });
+            onChange({ ...query, ...(exampleQuery as Partial<MyQuery>) });
             setShowHelp(false); // Hide help after selecting an example
           }}
         />
