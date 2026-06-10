@@ -1,5 +1,5 @@
 import { defineConfig } from 'eslint/config';
-import baseConfig from './.config/eslint.config.mjs';
+import baseConfig from '@grafana/eslint-config/flat.js';
 
 export default defineConfig([
   {
@@ -37,3 +37,4 @@ export default defineConfig([
   },
   ...baseConfig,
 ]);
+
