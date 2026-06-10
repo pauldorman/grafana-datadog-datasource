@@ -26,6 +26,9 @@ work/
 ci/
 e2e-results/
 
+# Version management
+.mise.toml
+
 # Editor
 .idea
 
