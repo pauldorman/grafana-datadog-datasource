@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -2118,6 +2119,38 @@ type TagKeysRequest struct {
 	Filter     string `json:"filter,omitempty"` // Filter pattern for tag keys (supports regex with /pattern/)
 }
 
+// Cloud Cost API Response structs
+type CostTagsResponse struct {
+	Data []struct {
+		Attributes struct {
+			Value string `json:"value"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+// Teams API Response structs
+type TeamsResponse struct {
+	Data []struct {
+		Attributes struct {
+			Name   string `json:"name"`
+			Handle string `json:"handle"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+// isCloudCostTag returns true if the tag is a known Cloud Cost or FOCUS source tag
+func isCloudCostTag(tag string) bool {
+	switch tag {
+	case "product", "product_name", "dimension_name", "datadog_product", "dimension",
+		"organization", "pricing_category", "cost_type", "dd-owner", "is_estimated",
+		"billingaccountname", "billingcurrency", "chargecategory", "displaycurrency",
+		"exchangerate", "providername", "servicename", "subaccountname":
+		return true
+	default:
+		return false
+	}
+}
+
 // TagValuesRequest represents the request for /resources/tag-values endpoint
 type TagValuesRequest struct {
 	MetricName string `json:"metricName,omitempty"`
@@ -3070,6 +3103,77 @@ func (d *Datasource) VariableTagValuesHandler(ctx context.Context, req *backend.
 			return sender.Send(&backend.CallResourceResponse{
 				Status: 401,
 				Body:   []byte(`{"error": "Invalid Datadog API credentials"}`),
+			})
+		}
+
+		tagKeyLower := strings.ToLower(tagValuesReq.TagKey)
+
+		// Check for specific endpoints (Cloud Cost Tags and Teams)
+		if tagKeyLower == "team" || isCloudCostTag(tagKeyLower) {
+			logger.Debug("Intercepting specific API variable query", "tagKey", tagKeyLower)
+
+			site := "datadoghq.com"
+			if d.JSONData != nil && d.JSONData.Site != "" {
+				site = d.JSONData.Site
+			}
+
+			apiKey := d.SecureJSONData["apiKey"]
+			appKey := d.SecureJSONData["appKey"]
+
+			var tagValues []string
+
+			if tagKeyLower == "team" {
+				urlStr := fmt.Sprintf("https://api.%s/api/v2/team", site)
+				bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
+				if err != nil {
+					logger.Error("Failed to fetch teams API", "error", err)
+				} else {
+					var teamResp TeamsResponse
+					if err := json.Unmarshal(bodyBytes, &teamResp); err == nil {
+						for _, item := range teamResp.Data {
+							if item.Attributes.Handle != "" {
+								tagValues = append(tagValues, item.Attributes.Handle)
+							} else if item.Attributes.Name != "" {
+								tagValues = append(tagValues, item.Attributes.Name)
+							}
+						}
+					}
+				}
+			} else {
+				urlStr := fmt.Sprintf("https://api.%s/api/v2/cost/tags?filter[match]=%s", site, url.QueryEscape(tagKeyLower))
+				bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
+				if err != nil {
+					logger.Error("Failed to fetch cost tags API", "error", err)
+				} else {
+					var costResp CostTagsResponse
+					if err := json.Unmarshal(bodyBytes, &costResp); err == nil {
+						for _, item := range costResp.Data {
+							val := item.Attributes.Value
+							// Strip prefix "tagKey:" if present
+							prefix := tagKeyLower + ":"
+							if strings.HasPrefix(strings.ToLower(val), prefix) {
+								val = val[len(prefix):]
+							}
+							tagValues = append(tagValues, val)
+						}
+					}
+				}
+			}
+
+			// Sort results
+			sort.Strings(tagValues)
+
+			// Cache and return
+			d.SetCachedEntry(cacheKey, tagValues)
+
+			duration := time.Since(startTime)
+			logVariableResponse(logger, traceID, "/resources/tag-values", 200, duration, len(tagValues), nil)
+
+			response := VariableResponse{Values: tagValues}
+			respData, _ := json.Marshal(response)
+			return sender.Send(&backend.CallResourceResponse{
+				Status: 200,
+				Body:   respData,
 			})
 		}
 
