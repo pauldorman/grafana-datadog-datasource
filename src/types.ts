@@ -25,9 +25,15 @@ export interface MyQuery extends DataQuery {
   // Query options
   interval?: number;   // Override interval in milliseconds
   // Logs query fields
-  queryType?: 'logs' | 'metrics' | 'cloud_cost'; // Query type - defaults to 'metrics'
+  // Logs query fields
+  queryType?: 'logs' | 'metrics' | 'cloud_cost' | 'logs-volume'; // Query type - defaults to 'metrics'
   logQuery?: string;   // Logs search query
   indexes?: string[];  // Target log indexes
+  // Pagination fields for logs
+  pageSize?: number;
+  currentPage?: number;
+  totalPages?: number;
+  nextCursor?: string;
   // JSON parsing configuration
   jsonParsing?: JSONParsingConfig;
   // Explore mode metadata for visualization hints

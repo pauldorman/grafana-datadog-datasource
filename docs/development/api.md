@@ -577,10 +577,17 @@ interface MetricFindValue {
 func (d *Datasource) handleVariableQuery(ctx context.Context, query string) ([]backend.MetricFindValue, error)
 
 // Supported query patterns:
+// 1. Primary Patterns
 // - tag_values(metric, tag)
 // - tag_values(metric, tag, filter)
 // - metrics(pattern)
-// - tag_names(metric)
+// - tag_names(metric) or tag_keys(metric)
+// 2. Legacy Datadog Patterns (Migration Support)
+// - all-metrics
+// - all-tags
+// - [tag]
+// - [metric]:all-tags
+// - [metric]:[tag]
 ```
 
 ## Testing API

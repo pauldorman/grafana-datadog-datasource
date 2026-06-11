@@ -1,9 +1,9 @@
-import { 
-  DataSourceInstanceSettings, 
-  CoreApp, 
-  ScopedVars, 
-  MetricFindValue, 
-  QueryFixAction, 
+import {
+  DataSourceInstanceSettings,
+  CoreApp,
+  ScopedVars,
+  MetricFindValue,
+  QueryFixAction,
   QueryFixType,
   DataSourceWithSupplementaryQueriesSupport,
   SupplementaryQueryType,
@@ -33,21 +33,21 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
   applyTemplateVariables(query: MyQuery, scopedVars: ScopedVars) {
     // Detect query type and set it on the query
     const queryType = this.detectQueryType(query);
-    
+
     // Migrate JSON parsing configuration for backward compatibility
     const migratedQuery = migrateJsonParsingConfiguration(query);
-    
+
     // Use the enhanced variable interpolation service that handles both metrics and logs
     const interpolatedQuery = variableInterpolationService.interpolateQuery(migratedQuery, scopedVars);
-    
+
     // Set the detected query type
     interpolatedQuery.queryType = queryType;
-    
+
     // For logs queries, ensure indexes array is preserved if present
     if (queryType === 'logs' && query.indexes) {
       interpolatedQuery.indexes = query.indexes;
     }
-    
+
     return interpolatedQuery;
   }
 
@@ -56,7 +56,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const hasMetricsQuery = !!query.queryText;
     const hasExpressionQuery = query.type === 'math' && !!query.expression;
     const hasLogsQuery = !!query.logQuery;
-    
+
     // For logs queries, perform additional validation
     if (hasLogsQuery && query.logQuery) {
       // Import validation function dynamically to avoid circular dependencies
@@ -69,14 +69,14 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       }).catch(err => {
       });
     }
-    
+
     return hasMetricsQuery || hasExpressionQuery || hasLogsQuery;
   }
 
   /**
    * Detects whether a query should be treated as a logs query based on panel context and query properties
    */
-  private detectQueryType(query: MyQuery): 'logs' | 'metrics' {
+  private detectQueryType(query: MyQuery): 'logs' | 'metrics' | 'cloud_cost' | 'logs-volume' {
     // If queryType is explicitly set, use it
     if (query.queryType) {
       return query.queryType;
@@ -119,7 +119,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       case SupplementaryQueryType.LogsVolume:
         // Only generate volume queries for logs queries
         const queryType = this.detectQueryType(query);
-        
+
         if (queryType !== 'logs' || !query.logQuery) {
           return undefined;
         }
@@ -140,7 +140,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           totalPages: undefined,
           nextCursor: '',
         };
-        
+
         return volumeQuery;
 
       default:
@@ -157,7 +157,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     type: SupplementaryQueryType,
     request: DataQueryRequest<MyQuery>
   ): DataQueryRequest<MyQuery> | undefined {
-    
+
     switch (type) {
       case SupplementaryQueryType.LogsVolume:
         const result = this.getLogsVolumeDataProvider(request);
@@ -293,22 +293,53 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
    */
   async metricFindQuery(query: MyVariableQuery | string): Promise<MetricFindValue[]> {
     try {
-      
+
       // Handle string queries (legacy format)
       if (typeof query === 'string') {
+        const queryString = query;
         try {
-          const parsedQuery = JSON.parse(query) as MyVariableQuery;
+          const parsedQuery = JSON.parse(queryString) as MyVariableQuery;
           query = parsedQuery;
         } catch (e) {
-          return [];
+          const trimmedQuery = queryString.trim();
+
+          // API Patterns (Primary)
+          const tagValuesMatch = trimmedQuery.match(/^tag_values\(([^,]+),\s*([^)]+)\)$/);
+          const tagKeysMatch = trimmedQuery.match(/^tag_(?:keys|names)\(([^)]+)\)$/);
+          const metricsMatch = trimmedQuery.match(/^metrics\(([^)]+)\)$/);
+
+          // Datadog Proprietary Patterns (Migration Support)
+          const metricAllTagsMatch = trimmedQuery.match(/^([^:]+):all-tags$/);
+          const metricTagMatch = trimmedQuery.match(/^([^:]+):([^:]+)$/);
+
+          if (tagValuesMatch) {
+            query = { queryType: 'tag_values', metricName: tagValuesMatch[1].trim(), tagKey: tagValuesMatch[2].trim() } as MyVariableQuery;
+          } else if (tagKeysMatch) {
+            query = { queryType: 'tag_keys', metricName: tagKeysMatch[1].trim() } as MyVariableQuery;
+          } else if (metricsMatch) {
+            query = { queryType: 'metrics', metricName: metricsMatch[1].trim() } as MyVariableQuery;
+          } else if (trimmedQuery === 'all-metrics') {
+            query = { queryType: 'metrics', metricName: '*' } as MyVariableQuery;
+          } else if (trimmedQuery === 'all-tags') {
+            query = { queryType: 'tag_keys', metricName: '*' } as MyVariableQuery;
+          } else if (metricAllTagsMatch) {
+            query = { queryType: 'tag_keys', metricName: metricAllTagsMatch[1].trim() } as MyVariableQuery;
+          } else if (metricTagMatch) {
+            query = { queryType: 'tag_values', metricName: metricTagMatch[1].trim(), tagKey: metricTagMatch[2].trim() } as MyVariableQuery;
+          } else if (trimmedQuery.length > 0 && !trimmedQuery.includes(':') && !trimmedQuery.includes('(')) {
+            // [tag] - single word without colons or parenthesis
+            query = { queryType: 'tag_values', metricName: '*', tagKey: trimmedQuery } as MyVariableQuery;
+          } else {
+            return [];
+          }
         }
       }
-      
+
       // Ensure we have a valid query object
       if (!query || typeof query !== 'object' || !query.queryType) {
         return [];
       }
-      
+
       // Validate required fields and return empty results if any are empty
       const validateAndConvertField = (value: string | undefined): string => {
         // Convert empty/undefined to '*' for backend compatibility
@@ -337,7 +368,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           }
           break;
       }
-      
+
       // Determine the resource endpoint based on query type
       let resourcePath = '';
       const params: Record<string, string> = {};
@@ -398,7 +429,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
 
       return [];
     } catch (error) {
-      
+
       // Return empty array on error to prevent Grafana from showing error dialogs
       // The error will be logged but won't break the variable functionality
       return [];
