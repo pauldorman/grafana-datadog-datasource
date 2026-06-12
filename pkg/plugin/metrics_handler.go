@@ -91,18 +91,6 @@ func (h *MetricsHandler) processQuery(qm *QueryModel) error {
 	} else if qm.QueryText != "" {
 		// This is a regular metrics query - add it to the queries list
 		queryText := qm.QueryText
-		lowerQuery := strings.ToLower(queryText)
-
-		hasGroupByClause := strings.Contains(lowerQuery, " by ")
-		hasBooleanOperators := strings.Contains(lowerQuery, " in ") ||
-			strings.Contains(lowerQuery, " or ") ||
-			strings.Contains(lowerQuery, " and ") ||
-			strings.Contains(lowerQuery, " not in ")
-
-		if !hasGroupByClause && !hasBooleanOperators {
-			queryText = queryText + " by {*}"
-			logger.Debug("Added 'by {*}' to query", "original", qm.QueryText, "modified", queryText)
-		}
 
 		dataSourceParams := datadogV2.METRICSDATASOURCE_METRICS
 		if qm.QueryType == "cloud_cost" {
@@ -203,7 +191,7 @@ func (h *MetricsHandler) executeQueries(ctx context.Context) (*backend.QueryData
 		logger.Error("Failed to parse metrics response", "error", err)
 		// Return error for all queries
 		for refID := range h.queryModels {
-			response.Responses[refID] = backend.ErrDataResponse(backend.StatusBadRequest, 
+			response.Responses[refID] = backend.ErrDataResponse(backend.StatusBadRequest,
 				fmt.Sprintf("Failed to process metrics response: %v", err))
 		}
 		return response, nil

@@ -884,263 +884,6 @@ func replaceTemplateVariables(template string, labels map[string]string) string 
 	return result
 }
 
-// queryDatadog executes a Datadog query and returns Grafana DataFrames
-func (d *Datasource) queryDatadog(ctx context.Context, api *datadogV2.MetricsApi, from, to int64, qm *QueryModel, refID string) (data.Frames, error) {
-	logger := log.New()
-
-	// Modify query to include "by {*}" if no "by" clause is present
-	// This ensures we get individual series instead of a single aggregated series
-	// However, skip this if the query already has complex filtering (IN, OR, AND operators)
-	// as those queries are likely already designed to return specific series
-	queryText := qm.QueryText
-	lowerQuery := strings.ToLower(queryText)
-
-	hasGroupByClause := strings.Contains(lowerQuery, " by ")
-	hasBooleanOperators := strings.Contains(lowerQuery, " in ") ||
-		strings.Contains(lowerQuery, " or ") ||
-		strings.Contains(lowerQuery, " and ") ||
-		strings.Contains(lowerQuery, " not in ")
-
-	if !hasGroupByClause && !hasBooleanOperators {
-		// No "by" clause and no boolean operators present, add "by {*}" to get all series
-		queryText = queryText + " by {*}"
-		logger.Debug("Added 'by {*}' to query", "original", qm.QueryText, "modified", queryText)
-	} else if hasBooleanOperators {
-		logger.Debug("Skipping 'by {*}' addition due to boolean operators", "original", qm.QueryText)
-	}
-
-	body := datadogV2.TimeseriesFormulaQueryRequest{
-		Data: datadogV2.TimeseriesFormulaRequest{
-			Type: datadogV2.TIMESERIESFORMULAREQUESTTYPE_TIMESERIES_REQUEST,
-			Attributes: datadogV2.TimeseriesFormulaRequestAttributes{
-				From: from,
-				To:   to,
-				Queries: []datadogV2.TimeseriesQuery{
-					{
-						MetricsTimeseriesQuery: &datadogV2.MetricsTimeseriesQuery{
-							DataSource: datadogV2.METRICSDATASOURCE_METRICS,
-							Query:      queryText,
-						}},
-				},
-			},
-		},
-	}
-
-	// Call Datadog Metrics API
-	resp, r, err := api.QueryTimeseriesData(ctx, body)
-	if err != nil {
-		// Log request body for debugging
-		requestBody, _ := json.MarshalIndent(body, "", "  ")
-		logger.Error("QueryTimeseriesData request body",
-			"request", string(requestBody))
-
-		// Log HTTP response details
-		httpStatus := 0
-		var responseBody string
-		if r != nil {
-			httpStatus = r.StatusCode
-			if r.Body != nil {
-				bodyBytes, _ := io.ReadAll(r.Body)
-				responseBody = string(bodyBytes)
-				// Restore body for potential future reads (though it's exhausted here)
-				r.Body = io.NopCloser(strings.NewReader(responseBody))
-			}
-		}
-
-		logger.Error("QueryTimeseriesData API call failed",
-			"error", err,
-			"errorString", err.Error(),
-			"httpStatus", httpStatus,
-			"responseBody", responseBody)
-
-		// Build detailed error message based on HTTP status and response
-		var errorMsg string
-
-		// Check for authentication errors
-		if httpStatus == 401 || strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "Unauthorized") {
-			errorMsg = "Invalid Datadog API credentials"
-		} else if httpStatus == 403 || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Forbidden") {
-			errorMsg = "API key missing required permissions (need 'metrics_read' scope)"
-		} else if httpStatus == 400 || strings.Contains(err.Error(), "400") {
-			// Parse error response for specific validation issues
-			errorMsg = parseDatadogErrorResponse(responseBody, qm.QueryText)
-		} else if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "context deadline exceeded") {
-			errorMsg = "Query timeout - Datadog API took too long to respond"
-		} else if httpStatus >= 500 {
-			errorMsg = fmt.Sprintf("Datadog API error (%d) - service may be unavailable", httpStatus)
-		} else {
-			errorMsg = fmt.Sprintf("Datadog API error: %s", err.Error())
-		}
-
-		return nil, fmt.Errorf("%s", errorMsg)
-	}
-
-	// Debug: Log the response to understand what Datadog is returning
-	// responseContent, _ := json.MarshalIndent(resp, "", "  ")
-	// logger.Debug("Datadog API Response", "response", string(responseContent))
-
-	// Build frames from response
-	var frames data.Frames
-
-	// Check if response has series data
-	series := resp.GetData()
-	if len(series.Attributes.Series) == 0 {
-		return frames, nil
-	}
-
-	times := resp.GetData().Attributes.GetTimes()
-	values := resp.GetData().Attributes.GetValues()
-
-	logger.Info("Processing Datadog series",
-		"seriesCount", len(series.Attributes.Series),
-		"timesCount", len(times),
-		"valuesCount", len(values))
-
-	for i := range series.Attributes.GetSeries() {
-		s := &series.Attributes.Series[i]
-
-		// Use the series index (i) instead of queryIndex for values array
-		// queryIndex is for multi-query requests, but for series within the same query,
-		// we need to use the series index to get the correct values
-		seriesIndex := i
-
-		// Check if we have data for this series index
-		if seriesIndex >= len(values) {
-			logger.Warn("Series index out of bounds", "seriesIndex", seriesIndex, "valuesCount", len(values))
-			continue
-		}
-
-		pointlist := values[seriesIndex]
-		if len(pointlist) == 0 {
-			logger.Debug("Empty pointlist for series", "seriesIndex", seriesIndex)
-			continue
-		}
-
-		// Extract metric name and build series label
-		// The metric name comes from the query, group_tags identify the specific series
-		metric := qm.QueryText
-
-		// Parse group tags (dimensions) into labels
-		labels := map[string]string{}
-		tagSet := s.GetGroupTags()
-
-		// Create a safe slice for logging first few values
-		maxLogValues := 5
-		if len(pointlist) < maxLogValues {
-			maxLogValues = len(pointlist)
-		}
-		firstFewValues := make([]interface{}, maxLogValues)
-		for idx := 0; idx < maxLogValues; idx++ {
-			if pointlist[idx] != nil {
-				firstFewValues[idx] = *pointlist[idx]
-			} else {
-				firstFewValues[idx] = nil
-			}
-		}
-
-		logger.Info("Processing series",
-			"seriesIndex", seriesIndex,
-			"queryIndex", func() int {
-				if s.QueryIndex != nil {
-					return int(*s.QueryIndex)
-				}
-				return -1
-			}(),
-			"groupTags", tagSet,
-			"pointCount", len(pointlist),
-			"firstFewValues", firstFewValues)
-
-		if len(tagSet) > 0 {
-			for _, tag := range tagSet {
-				parts := strings.SplitN(tag, ":", 2)
-				if len(parts) == 2 {
-					labels[parts[0]] = parts[1]
-				}
-			}
-		}
-
-		// Extract timestamps and values
-		timeValues := make([]time.Time, 0)
-		numberValues := make([]float64, 0)
-
-		// pointlist is []*float64, and times is []int64 (in milliseconds from Datadog API)
-		// Zip them together - Grafana expects time.Time objects
-		for j, timeVal := range times {
-			if j >= len(pointlist) {
-				break
-			}
-			point := pointlist[j]
-			if point != nil {
-				// Convert milliseconds timestamp to time.Time
-				timestamp := time.UnixMilli(timeVal)
-				timeValues = append(timeValues, timestamp)
-				numberValues = append(numberValues, *point)
-			}
-		}
-
-		if len(timeValues) == 0 {
-			logger.Debug("No valid time values for series", "seriesIndex", seriesIndex)
-			continue
-		}
-
-		// Build series name using new legend configuration
-		seriesName := metric // Default to the query text if no custom legend
-
-		// Determine legend template based on legend mode
-		var legendTemplate string
-		if qm.LegendMode == "custom" && qm.LegendTemplate != "" {
-			legendTemplate = qm.LegendTemplate
-		} else if qm.InterpolatedLabel != "" {
-			// Backward compatibility: use interpolated label if available
-			legendTemplate = qm.InterpolatedLabel
-		} else if qm.Label != "" {
-			// Backward compatibility: fall back to old label field
-			legendTemplate = qm.Label
-		}
-
-		if legendTemplate != "" {
-			// Use the legend template, replacing template variables with label values
-			seriesName = replaceTemplateVariables(legendTemplate, labels)
-		} else if len(labels) > 0 {
-			// Auto mode: use default format with metric + labels
-			var labelStrings []string
-			for k, v := range labels {
-				labelStrings = append(labelStrings, k+":"+v)
-			}
-			seriesName = metric + " {" + strings.Join(labelStrings, ", ") + "}"
-		}
-
-		logger.Info("Creating frame for series",
-			"seriesIndex", seriesIndex,
-			"seriesName", seriesName,
-			"labels", labels,
-			"timeValueCount", len(timeValues),
-			"numberValueCount", len(numberValues))
-
-		// Create data frame with proper timeseries format
-		frame := data.NewFrame(
-			seriesName, // Use the correctly formatted series name as frame name
-			data.NewField("Time", nil, timeValues),
-			data.NewField("Value", labels, numberValues), // Attach labels to the field for filtering/grouping
-		)
-
-		// Configure the display name to ensure it shows the formatted name
-		frame.Fields[1].Config = &data.FieldConfig{
-			DisplayName: seriesName, // Explicitly set display name to our formatted series name
-		}
-
-		// Set metadata to indicate this is timeseries data
-		frame.Meta = &data.FrameMeta{
-			Type: data.FrameTypeTimeSeriesMulti,
-		}
-
-		frame.RefID = refID // Use the query's RefID instead of metric name
-		frames = append(frames, frame)
-	}
-
-	logger.Info("Completed processing series", "totalFrames", len(frames))
-	return frames, nil
-}
 
 // parseDatadogError parses Datadog API errors and returns user-friendly messages
 func (d *Datasource) parseDatadogError(err error, httpStatus int, responseBody string) string {
@@ -3791,7 +3534,8 @@ func (d *Datasource) VariableTeamsHandler(ctx context.Context, req *backend.Call
 		})
 	}
 
-	if err := validateAPICredentials(logger, traceID, d.SecureJSONData); err != nil {
+	apiKey, appKey, site, err := d.validateCredentials()
+	if err != nil {
 		duration := time.Since(startTime)
 		logVariableResponse(logger, traceID, "/resources/teams", 401, duration, 0, err)
 		return sender.Send(&backend.CallResourceResponse{
@@ -3800,18 +3544,13 @@ func (d *Datasource) VariableTeamsHandler(ctx context.Context, req *backend.Call
 		})
 	}
 
-	site := "datadoghq.com"
-	if d.JSONData != nil && d.JSONData.Site != "" {
-		site = d.JSONData.Site
-	}
-
-	apiKey := d.SecureJSONData["apiKey"]
-	appKey := d.SecureJSONData["appKey"]
-
 	var tagValues []string
 
+	maxPages := 50
+	pageCount := 0
 	urlStr := fmt.Sprintf("https://api.%s/api/v2/team?page[size]=100", site)
-	for urlStr != "" {
+	for urlStr != "" && pageCount < maxPages {
+		pageCount++
 		bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
 		if err != nil {
 			logger.Error("Failed to fetch teams API", "error", err, "traceID", traceID)
@@ -3833,7 +3572,11 @@ func (d *Datasource) VariableTeamsHandler(ctx context.Context, req *backend.Call
 				nextUrl := ""
 				if links, ok := generic["links"].(map[string]interface{}); ok {
 					if next, ok := links["next"].(string); ok {
-						nextUrl = next
+						if !strings.HasPrefix(next, "http") {
+							nextUrl = fmt.Sprintf("https://api.%s%s", site, next)
+						} else {
+							nextUrl = next
+						}
 					}
 				}
 				urlStr = nextUrl
@@ -3889,27 +3632,23 @@ func (d *Datasource) VariableCostTagValuesHandler(ctx context.Context, req *back
 		})
 	}
 
-	if err := validateAPICredentials(logger, traceID, d.SecureJSONData); err != nil {
+	apiKey, appKey, site, err := d.validateCredentials()
+	if err != nil {
 		return sender.Send(&backend.CallResourceResponse{
 			Status: 401,
 			Body:   []byte(`{"error": "Invalid Datadog API credentials"}`),
 		})
 	}
 
-	site := "datadoghq.com"
-	if d.JSONData != nil && d.JSONData.Site != "" {
-		site = d.JSONData.Site
-	}
-
-	apiKey := d.SecureJSONData["apiKey"]
-	appKey := d.SecureJSONData["appKey"]
-
 	var tagValues []string
 	tagKeyLower := strings.ToLower(tagValuesReq.TagKey)
 
+	maxPages := 50
+	pageCount := 0
 	urlStr := fmt.Sprintf("https://api.%s/api/v2/cost/tags?filter[match]=%s", site, url.QueryEscape(tagKeyLower))
 
-	for urlStr != "" {
+	for urlStr != "" && pageCount < maxPages {
+		pageCount++
 		bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
 		if err != nil {
 			logger.Error("Failed to fetch cost tags API", "error", err, "traceID", traceID)
@@ -3938,7 +3677,11 @@ func (d *Datasource) VariableCostTagValuesHandler(ctx context.Context, req *back
 				nextUrl := ""
 				if links, ok := generic["links"].(map[string]interface{}); ok {
 					if next, ok := links["next"].(string); ok {
-						nextUrl = next
+						if !strings.HasPrefix(next, "http") {
+							nextUrl = fmt.Sprintf("https://api.%s%s", site, next)
+						} else {
+							nextUrl = next
+						}
 					}
 				}
 				urlStr = nextUrl
