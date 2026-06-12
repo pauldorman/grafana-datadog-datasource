@@ -3153,8 +3153,8 @@ func (d *Datasource) VariableTagValuesHandler(ctx context.Context, req *backend.
 							prefix := tagKeyLower + ":"
 							if strings.HasPrefix(strings.ToLower(val), prefix) {
 								val = val[len(prefix):]
+								tagValues = append(tagValues, val)
 							}
-							tagValues = append(tagValues, val)
 						}
 					}
 				}
