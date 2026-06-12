@@ -18,17 +18,17 @@ export class VariableInterpolationService {
   interpolateQuery(query: MyQuery, scopedVars: ScopedVars): MyQuery {
     try {
       // Determine the effective legend template based on mode
-      const effectiveLegendTemplate = query.legendMode === 'custom' && query.legendTemplate 
-        ? query.legendTemplate 
+      const effectiveLegendTemplate = query.legendMode === 'custom' && query.legendTemplate
+        ? query.legendTemplate
         : '';
 
       const result: MyQuery = {
         ...query,
-        queryText: this.interpolateString(query.queryText || '', scopedVars),
-        legendTemplate: query.legendMode === 'custom' 
+        queryText: this.interpolateMetricsQuery(query.queryText || '', scopedVars),
+        legendTemplate: query.legendMode === 'custom'
           ? this.interpolateString(query.legendTemplate || '', scopedVars)
           : '',
-        interpolatedQueryText: this.interpolateString(query.queryText || '', scopedVars),
+        interpolatedQueryText: this.interpolateMetricsQuery(query.queryText || '', scopedVars),
         interpolatedLabel: this.interpolateString(effectiveLegendTemplate, scopedVars),
       };
 
@@ -43,8 +43,8 @@ export class VariableInterpolationService {
       return {
         ...query,
         interpolatedQueryText: query.queryText,
-        interpolatedLabel: query.legendMode === 'custom' && query.legendTemplate 
-          ? query.legendTemplate 
+        interpolatedLabel: query.legendMode === 'custom' && query.legendTemplate
+          ? query.legendTemplate
           : '',
         // Preserve original logQuery on error to prevent injection
         logQuery: query.logQuery,
@@ -65,13 +65,13 @@ export class VariableInterpolationService {
       // Handle custom format specifiers like ${variable:format} with logs-specific formatting
       let interpolated = logQuery.replace(/\$\{([^}:]+):([^}]+)\}/g, (match, varName, format) => {
         const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
-        
+
         if (!variable) {
           return match; // Return original if variable not found
         }
 
         const context = this.createInterpolationContext(variable, format as VariableFormat);
-        
+
         // Use logs-specific formatting for multi-value variables
         return this.formatMultiValueForLogs(context.values, context.format || 'logs');
       });
@@ -79,17 +79,14 @@ export class VariableInterpolationService {
       // Handle simple variables like $variable with logs-safe interpolation
       interpolated = interpolated.replace(/\$([a-zA-Z_][a-zA-Z0-9_]*)/g, (match, varName) => {
         const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
-        
+
         if (!variable) {
           return match; // Return original if variable not found
         }
 
         // Get variable values and apply logs-safe formatting
-        const values = Array.isArray(variable.current?.value) 
-          ? variable.current.value 
-          : [variable.current?.value].filter(Boolean);
-        
-        return this.formatMultiValueForLogs(values, 'logs');
+        const context = this.createInterpolationContext(variable, 'csv');
+        return this.formatMultiValueForLogs(context.values, 'logs');
       });
 
       return interpolated;
@@ -110,9 +107,9 @@ export class VariableInterpolationService {
 
     // Filter out null, undefined, and empty string values, and sanitize for logs
     const filteredValues = values
-      .filter(value => 
-        value !== null && 
-        value !== undefined && 
+      .filter(value =>
+        value !== null &&
+        value !== undefined &&
         value !== ''
       )
       .map(value => this.sanitizeLogsValue(String(value)));
@@ -128,24 +125,24 @@ export class VariableInterpolationService {
           return filteredValues[0];
         }
         return `(${filteredValues.join(' OR ')})`;
-      
+
       case 'lucene':
         // Use existing Lucene formatting with proper escaping
         return `(${filteredValues.map(v => `"${this.escapeLuceneValue(v)}"`).join(' OR ')})`;
-      
+
       case 'csv':
         return filteredValues.join(',');
-      
+
       case 'pipe':
         return filteredValues.join('|');
-      
+
       case 'json':
         return JSON.stringify(filteredValues);
-      
+
       case 'raw':
         // Return the first value for raw format
         return filteredValues[0];
-      
+
       default:
         // Default to logs format for unknown formats
         if (filteredValues.length === 1) {
@@ -162,23 +159,23 @@ export class VariableInterpolationService {
   private sanitizeLogsValue(value: string): string {
     // Remove or escape potentially dangerous characters for logs queries
     // Datadog logs search uses Lucene-like syntax, so we need to escape special characters
-    
+
     // First, trim whitespace
     let sanitized = value.trim();
-    
+
     // Prevent injection of boolean operators at the start/end
     sanitized = sanitized.replace(/^(AND|OR|NOT)\s+/i, '');
     sanitized = sanitized.replace(/\s+(AND|OR|NOT)$/i, '');
-    
+
     // Escape special Datadog logs search characters, but be more selective
     // Only escape characters that are truly problematic in logs search context
     sanitized = sanitized.replace(/[+&|!(){}[\]^"~*?:\\]/g, '\\$&');
-    
+
     // Handle quotes - if the value contains spaces, wrap in quotes
     if (sanitized.includes(' ') && !sanitized.startsWith('"') && !sanitized.endsWith('"')) {
       sanitized = `"${sanitized}"`;
     }
-    
+
     return sanitized;
   }
 
@@ -197,6 +194,53 @@ export class VariableInterpolationService {
   }
 
   /**
+   * Interpolates variables in a metrics or cloud cost query with safety measures.
+   * Handles Datadog-native boolean forms for multi-select variables.
+   */
+  private interpolateMetricsQuery(queryText: string, scopedVars: ScopedVars): string {
+    if (!queryText) {
+      return '';
+    }
+
+    try {
+      // First, handle key:$var and key:${var} patterns for Datadog native multi-select syntax
+      let interpolated = queryText.replace(/([a-zA-Z0-9_.\-\/]+):(?:\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+))/g, (match, key, varName1, varName2) => {
+        const varName = varName1 || varName2;
+        const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
+
+        if (!variable) {
+          return match; // Return original if variable not found
+        }
+
+        const context = this.createInterpolationContext(variable, 'csv');
+        const values = context.values.filter(v => v !== null && v !== undefined && v !== '');
+
+        if (values.length === 0) {
+          return match;
+        }
+
+        // If it's the "All" wildcard, use key:*
+        if (values.length === 1 && values[0] === '*') {
+          return `${key}:*`;
+        }
+
+        // If it's a single value, use key:value
+        if (values.length === 1) {
+          return `${key}:${values[0]}`;
+        }
+
+        // For multiple values, use Datadog's IN syntax: key IN (val1, val2)
+        return `${key} IN (${values.join(', ')})`;
+      });
+
+      // Then fall back to standard interpolation for any remaining variables (e.g., in `by {$var}`)
+      return this.interpolateString(interpolated, scopedVars);
+    } catch (error) {
+      return queryText; // Return original query on error
+    }
+  }
+
+  /**
    * Interpolates variables in a string with custom formatting support.
    * @param text - The text to interpolate
    * @param scopedVars - Scoped variables for interpolation
@@ -211,7 +255,7 @@ export class VariableInterpolationService {
       // Handle custom format specifiers like ${variable:format}
       return text.replace(/\$\{([^}:]+):([^}]+)\}/g, (match, varName, format) => {
         const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
-        
+
         if (!variable) {
           return match; // Return original if variable not found
         }
@@ -275,9 +319,9 @@ export class VariableInterpolationService {
     }
 
     // Filter out null, undefined, and empty string values
-    const filteredValues = values.filter(value => 
-      value !== null && 
-      value !== undefined && 
+    const filteredValues = values.filter(value =>
+      value !== null &&
+      value !== undefined &&
       value !== ''
     );
 
@@ -288,21 +332,21 @@ export class VariableInterpolationService {
     switch (format) {
       case 'csv':
         return filteredValues.join(',');
-      
+
       case 'pipe':
         return filteredValues.join('|');
-      
+
       case 'json':
         return JSON.stringify(filteredValues);
-      
+
       case 'lucene':
         // Format for Lucene queries: (value1 OR value2 OR value3)
         return `(${filteredValues.map(v => `"${this.escapeLuceneValue(v)}"`).join(' OR ')})`;
-      
+
       case 'raw':
         // Return the first value for raw format
         return filteredValues[0];
-      
+
       default:
         // Default to CSV format
         return filteredValues.join(',');
@@ -344,7 +388,7 @@ export class VariableInterpolationService {
     }
 
     const variables: string[] = [];
-    
+
     // Extract from ${variable:format} patterns
     const formatMatches = text.match(/\$\{([^}:]+):[^}]+\}/g);
     if (formatMatches) {

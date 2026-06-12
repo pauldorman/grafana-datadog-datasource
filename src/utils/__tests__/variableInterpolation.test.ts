@@ -454,4 +454,71 @@ describe('VariableInterpolationService', () => {
       expect(result.legendTemplate).toBe('Unknown: ${unknown:csv}');
     });
   });
+
+  describe('metrics query interpolation (Datadog-native syntax)', () => {
+    beforeEach(() => {
+      mockTemplateSrv.getVariables.mockReturnValue([
+        {
+          name: 'product',
+          current: { value: ['apm', 'audit_trail'] },
+        },
+        {
+          name: 'env',
+          current: { value: 'prod' },
+        },
+        {
+          name: 'team',
+          current: { value: '*' },
+        },
+      ]);
+    });
+
+    it('should format multi-select variables using IN syntax', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{datadog_product:$product}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{datadog_product IN (apm, audit_trail)}');
+    });
+
+    it('should format single values as standard key:value', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{env:$env}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{env:prod}');
+    });
+
+    it('should format All wildcard as key:*', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{team:$team}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{team:*}');
+    });
+
+    it('should not affect variables used without keys (e.g. in grouping)', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{datadog_product:$product} by {$product}',
+      };
+
+      const scopedVars: ScopedVars = {
+        product: { value: ['apm', 'audit_trail'] }
+      };
+
+      mockTemplateSrv.replace.mockImplementation((text: string) => {
+        return text.replace('$product', 'apm,audit_trail'); // Mocking Grafana default formatting for `by {$product}`
+      });
+
+      const result = service.interpolateQuery(query, scopedVars);
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{datadog_product IN (apm, audit_trail)} by {apm,audit_trail}');
+    });
+  });
 });
