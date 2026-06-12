@@ -63,6 +63,30 @@ describe('DataSource variable query parser', () => {
         });
       });
 
+      it('should parse tag_values(metricName, tagKey, filter)', async () => {
+        await datasource.metricFindQuery('tag_values(system.cpu.user, env, $environment)');
+        
+        expect(mockPost).toHaveBeenCalledWith(`/api/datasources/uid/${uid}/resources/tag-values`, {
+          metricName: 'system.cpu.user',
+          tagKey: 'env',
+          filter: '$environment'
+        });
+      });
+
+      it('should parse cost_tag_values(tagKey)', async () => {
+        await datasource.metricFindQuery('cost_tag_values(datadog_product)');
+        
+        expect(mockPost).toHaveBeenCalledWith(`/api/datasources/uid/${uid}/resources/cost-tag-values`, {
+          tagKey: 'datadog_product'
+        });
+      });
+
+      it('should parse teams()', async () => {
+        await datasource.metricFindQuery('teams()');
+        
+        expect(mockPost).toHaveBeenCalledWith(`/api/datasources/uid/${uid}/resources/teams`, {});
+      });
+
       it('should parse tag_keys(metricName)', async () => {
         await datasource.metricFindQuery('tag_keys(system.cpu.user)');
         

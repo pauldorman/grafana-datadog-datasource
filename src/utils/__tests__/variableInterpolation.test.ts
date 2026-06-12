@@ -400,6 +400,7 @@ describe('VariableInterpolationService', () => {
 
   describe('custom format interpolation', () => {
     beforeEach(() => {
+      mockTemplateSrv.replace.mockImplementation((text: string) => text);
       mockTemplateSrv.getVariables.mockReturnValue([
         {
           name: 'service',
@@ -457,20 +458,28 @@ describe('VariableInterpolationService', () => {
 
   describe('metrics query interpolation (Datadog-native syntax)', () => {
     beforeEach(() => {
-      mockTemplateSrv.getVariables.mockReturnValue([
-        {
-          name: 'product',
-          current: { value: ['apm', 'audit_trail'] },
-        },
-        {
-          name: 'env',
-          current: { value: 'prod' },
-        },
-        {
-          name: 'team',
-          current: { value: '*' },
-        },
-      ]);
+      // Mock templateSrv.replace since that's what we now use for metric queries
+      mockTemplateSrv.replace.mockImplementation((target: string, scopedVars: any, formatFn: Function) => {
+        let result = target;
+        const vars = {
+          product: { value: ['apm', 'audit_trail'] },
+          env: { value: 'prod' },
+          team: { value: ['*'] },
+          empty_var: { value: [] },
+          spaced: { value: ['foo bar', 'baz'] },
+          malicious: { value: ['drop me!', 'valid_val'] }
+        };
+
+        result = result.replace(/\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g, (match, v1, v2) => {
+          const varName = v1 || v2;
+          if (vars[varName as keyof typeof vars]) {
+            return formatFn(vars[varName as keyof typeof vars].value, vars[varName as keyof typeof vars]);
+          }
+          return match;
+        });
+
+        return result;
+      });
     });
 
     it('should format multi-select variables using IN syntax', () => {
@@ -503,22 +512,37 @@ describe('VariableInterpolationService', () => {
       expect(result.queryText).toBe('sum:datadog.cost.amortized{team:*}');
     });
 
+    it('should handle empty selections gracefully', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{empty:$empty_var}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{empty:*}');
+    });
+
+    it('should drop unrepresentable characters in metric scopes and log a warning', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{malicious:$malicious}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{malicious:valid_val}');
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Dropping unrepresentable metric scope value'));
+      warnSpy.mockRestore();
+    });
+
     it('should not affect variables used without keys (e.g. in grouping)', () => {
       const query: MyQuery = {
         refId: 'A',
         queryText: 'sum:datadog.cost.amortized{datadog_product:$product} by {$product}',
       };
 
-      const scopedVars: ScopedVars = {
-        product: { value: ['apm', 'audit_trail'] }
-      };
-
-      mockTemplateSrv.replace.mockImplementation((text: string) => {
-        return text.replace('$product', 'apm,audit_trail'); // Mocking Grafana default formatting for `by {$product}`
-      });
-
-      const result = service.interpolateQuery(query, scopedVars);
-      expect(result.queryText).toBe('sum:datadog.cost.amortized{datadog_product IN (apm, audit_trail)} by {apm,audit_trail}');
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{datadog_product IN (apm, audit_trail)} by {apm, audit_trail}');
     });
   });
 });

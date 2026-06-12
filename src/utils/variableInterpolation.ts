@@ -180,6 +180,20 @@ export class VariableInterpolationService {
   }
 
   /**
+   * Sanitizes values for use in Datadog metric queries to prevent injection
+   * Applies safety measures specific to metric search syntax
+   */
+  private sanitizeMetricValue(value: string): string {
+    // Only pass through values matching safe charset
+    // If it contains unrepresentable chars, log a warning and return empty string to drop it
+    if (!/^[a-zA-Z0-9_\-./:]+$/.test(value)) {
+      console.warn(`Datadog Datasource: Dropping unrepresentable metric scope value: "${value}". Metric scopes only support alphanumeric characters, underscores, hyphens, periods, slashes, and colons.`);
+      return '';
+    }
+    return value;
+  }
+
+  /**
    * Interpolates variables in a label string.
    * @param label - The label string to interpolate
    * @param scopedVars - Scoped variables for interpolation
@@ -203,38 +217,52 @@ export class VariableInterpolationService {
     }
 
     try {
-      // First, handle key:$var and key:${var} patterns for Datadog native multi-select syntax
-      let interpolated = queryText.replace(/([a-zA-Z0-9_.\-\/]+):(?:\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+))/g, (match, key, varName1, varName2) => {
-        const varName = varName1 || varName2;
+      // Handle custom format specifiers like ${variable:format} manually for backward compatibility
+      let preprocessedQueryText = queryText.replace(/\$\{([^}:]+):([^}]+)\}/g, (match, varName, format) => {
         const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
-
         if (!variable) {
-          return match; // Return original if variable not found
-        }
-
-        const context = this.createInterpolationContext(variable, 'csv');
-        const values = context.values.filter(v => v !== null && v !== undefined && v !== '');
-
-        if (values.length === 0) {
           return match;
         }
-
-        // If it's the "All" wildcard, use key:*
-        if (values.length === 1 && values[0] === '*') {
-          return `${key}:*`;
-        }
-
-        // If it's a single value, use key:value
-        if (values.length === 1) {
-          return `${key}:${values[0]}`;
-        }
-
-        // For multiple values, use Datadog's IN syntax: key IN (val1, val2)
-        return `${key} IN (${values.join(', ')})`;
+        const context = this.createInterpolationContext(variable, format as VariableFormat);
+        return this.formatMultiValue(context.values, context.format || 'csv');
       });
 
-      // Then fall back to standard interpolation for any remaining variables (e.g., in `by {$var}`)
-      return this.interpolateString(interpolated, scopedVars);
+      // Use Grafana's built-in replace with a custom format function
+      // This correctly handles $__all (by resolving it to allValue before format runs), repeat panels, and scopedVars natively.
+      const datadogFormat = (value: string | string[], variable: any) => {
+        // Handle empty selections gracefully
+        if (!value || (Array.isArray(value) && value.length === 0)) {
+          return '*';
+        }
+
+        const values = Array.isArray(value) ? value : [value];
+
+        // Sanitize values
+        const sanitized = values
+          .map(v => this.sanitizeMetricValue(String(v)))
+          .filter(v => v !== '');
+
+        if (sanitized.length === 0) {
+          return '*'; // Fallback to wildcard if all values were dropped
+        }
+
+        if (sanitized.length === 1) {
+          return sanitized[0];
+        }
+
+        // For multiple values, emit a temporary marker
+        return `__IN__(${sanitized.join(', ')})`;
+      };
+
+      let replaced = this.templateSrv.replace(preprocessedQueryText, scopedVars, datadogFormat);
+
+      // Rewrite Datadog native multi-select: key:__IN__(a, b) -> key IN (a, b)
+      replaced = replaced.replace(/([a-zA-Z0-9_.\-\/]+):__IN__\(([^)]+)\)/g, '$1 IN ($2)');
+
+      // Cleanup leaked markers where IN syntax doesn't apply (e.g. `by {__IN__(a, b)}` -> `by {a, b}`)
+      replaced = replaced.replace(/__IN__\(([^)]+)\)/g, '$1');
+
+      return replaced;
     } catch (error) {
       return queryText; // Return original query on error
     }

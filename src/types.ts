@@ -83,7 +83,7 @@ export interface MySecureJsonData {
  * Supports querying Datadog API for metric names, tag keys, and tag values
  */
 export interface MyVariableQuery {
-  queryType: 'metrics' | 'tag_keys' | 'tag_values';
+  queryType: 'metrics' | 'tag_keys' | 'tag_values' | 'cost_tag_values' | 'teams';
   namespace?: string;        // Filter metrics by namespace (e.g., 'system', 'aws')
   searchPattern?: string;    // Search pattern for metrics (e.g., 'cpu', 'memory') - supports regex with /pattern/
   metricName?: string;       // Metric name for tag queries
@@ -135,7 +135,7 @@ export interface MetricFindValue {
  */
 export interface VariableQueryTypeOption {
   label: string;
-  value: 'metrics' | 'tag_keys' | 'tag_values';
+  value: 'metrics' | 'tag_keys' | 'tag_values' | 'cost_tag_values' | 'teams';
   description: string;
 }
 

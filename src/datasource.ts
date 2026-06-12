@@ -304,16 +304,27 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           const trimmedQuery = queryString.trim();
 
           // API Patterns (Primary)
-          const tagValuesMatch = trimmedQuery.match(/^tag_values\(([^,]+),\s*([^)]+)\)$/);
+          const tagValuesMatch = trimmedQuery.match(/^tag_values\(([^,]+),\s*([^,)]+)(?:,\s*([^)]+))?\)$/);
           const tagKeysMatch = trimmedQuery.match(/^tag_(?:keys|names)\(([^)]+)\)$/);
           const metricsMatch = trimmedQuery.match(/^metrics\(([^)]+)\)$/);
+          const costTagValuesMatch = trimmedQuery.match(/^cost_tag_values\(([^)]+)\)$/);
+          const teamsMatch = trimmedQuery.match(/^teams\(\)$/);
 
           // Datadog Proprietary Patterns (Migration Support)
           const metricAllTagsMatch = trimmedQuery.match(/^([^:]+):all-tags$/);
           const metricTagMatch = trimmedQuery.match(/^([^:]+):([^:]+)$/);
 
           if (tagValuesMatch) {
-            query = { queryType: 'tag_values', metricName: tagValuesMatch[1].trim(), tagKey: tagValuesMatch[2].trim() } as MyVariableQuery;
+            query = { 
+              queryType: 'tag_values', 
+              metricName: tagValuesMatch[1].trim(), 
+              tagKey: tagValuesMatch[2].trim(),
+              ...(tagValuesMatch[3] ? { filter: tagValuesMatch[3].trim() } : {})
+            } as MyVariableQuery;
+          } else if (costTagValuesMatch) {
+            query = { queryType: 'cost_tag_values', tagKey: costTagValuesMatch[1].trim() } as MyVariableQuery;
+          } else if (teamsMatch) {
+            query = { queryType: 'teams' } as MyVariableQuery;
           } else if (tagKeysMatch) {
             query = { queryType: 'tag_keys', metricName: tagKeysMatch[1].trim() } as MyVariableQuery;
           } else if (metricsMatch) {
@@ -367,15 +378,33 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
             return [];
           }
           break;
+        case 'cost_tag_values':
+          if (isFieldEmpty(query.tagKey)) {
+            return [];
+          }
+          break;
+        case 'teams':
+          // No required fields
+          break;
       }
 
       // Determine the resource endpoint based on query type
-      let resourcePath = '';
+      let resourceEndpoint = 'tag-values';
+      if (query.queryType === 'metrics') {
+        resourceEndpoint = 'metrics';
+      } else if (query.queryType === 'tag_keys') {
+        resourceEndpoint = 'tag-keys';
+      } else if (query.queryType === 'cost_tag_values') {
+        resourceEndpoint = 'cost-tag-values';
+      } else if (query.queryType === 'teams') {
+        resourceEndpoint = 'teams';
+      }
+
+      let resourcePath = resourceEndpoint;
       const params: Record<string, string> = {};
 
       switch (query.queryType) {
         case 'metrics':
-          resourcePath = 'metrics';
           if (query.namespace && query.namespace !== '*') {
             params.namespace = query.namespace;
           }
@@ -400,8 +429,25 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           params.tagKey = validateAndConvertField(query.tagKey);
           break;
 
+        case 'cost_tag_values':
+          resourcePath = 'cost-tag-values';
+          params.tagKey = validateAndConvertField(query.tagKey);
+          break;
+
+        case 'teams':
+          resourcePath = 'teams';
+          break;
+
         default:
           throw new Error(`Unknown query type: ${query.queryType}`);
+      }
+
+      // Convert pattern matching filters to regex format for the backend
+      if (query.searchPattern && query.searchPattern !== '*') {
+        params.searchPattern = query.searchPattern;
+      }
+      if (query.filter && query.filter !== '*') {
+        params.filter = query.filter;
       }
 
       // Build URL without query parameters (backend expects POST with JSON body)
