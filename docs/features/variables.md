@@ -68,7 +68,7 @@ Returns all Datadog Teams in your organization.
 
 - **Multi-value**: Allow selecting multiple values
 - **Include All option**: Add "All" choice to select everything
-- **Custom all value**: Define what "All" means (e.g., `*` or `{*}`)
+- **Custom all value**: Define what "All" means (e.g., `*` or `{*}`). Note: By default, if the variable selection is completely empty or natively evaluates to "All", the plugin safely evaluates it to `*` to match Datadog wildcard semantics.
 - **Preview of values**: See what values the query returns
 
 ## Using Variables in Queries
