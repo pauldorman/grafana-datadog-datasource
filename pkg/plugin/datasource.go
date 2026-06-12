@@ -653,8 +653,9 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 	// Create handlers for different query types
 	// Note: LogsVolumeQueryType is handled by LogsHandler - volume is calculated from log entries
 	handlers := make(map[QueryType]QueryHandler)
-	handlers[MetricsQueryType] = NewMetricsHandler(d, req.Queries, ddCtx, metricsApi)
-	handlers[CloudCostQueryType] = NewMetricsHandler(d, req.Queries, ddCtx, metricsApi)
+	sharedMetricsHandler := NewMetricsHandler(d, req.Queries, ddCtx, metricsApi)
+	handlers[MetricsQueryType] = sharedMetricsHandler
+	handlers[CloudCostQueryType] = sharedMetricsHandler
 	handlers[LogsQueryType] = NewLogsHandler(d, req.Queries, ddCtx)
 
 	// Parse all queries and route to appropriate handlers
@@ -692,7 +693,14 @@ func (d *Datasource) QueryData(ctx context.Context, req *backend.QueryDataReques
 
 	// Execute queries for each handler and merge responses
 	responses := make([]*backend.QueryDataResponse, 0)
+	executedHandlers := make(map[QueryHandler]bool)
+
 	for queryType, handler := range handlers {
+		if executedHandlers[handler] {
+			continue
+		}
+		executedHandlers[handler] = true
+
 		logger.Info("Executing handler", "queryType", queryType)
 		handlerResponse, err := handler.executeQueries(ctx)
 		if err != nil {
@@ -1342,12 +1350,10 @@ func (d *Datasource) processTimeseriesResponse(resp *datadogV2.TimeseriesFormula
 func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
 	logger := log.New()
 
-	// CRITICAL DEBUG: Log all incoming requests with ERROR level to ensure visibility
-	logger.Error("CRITICAL DEBUG - CallResource received request",
+	logger.Debug("CallResource received request",
 		"method", req.Method,
 		"path", req.Path,
 		"bodyLength", len(req.Body),
-		"body", string(req.Body),
 		"headers", req.Headers)
 
 	// Route requests to appropriate handlers
@@ -1384,6 +1390,10 @@ func (d *Datasource) CallResource(ctx context.Context, req *backend.CallResource
 		return d.VariableTagValuesHandler(ctx, req, sender)
 	case req.Method == "POST" && req.Path == "all-tags":
 		return d.VariableAllTagsHandler(ctx, req, sender)
+	case req.Method == "POST" && req.Path == "cost-tag-values":
+		return d.VariableCostTagValuesHandler(ctx, req, sender)
+	case req.Method == "POST" && req.Path == "teams":
+		return d.VariableTeamsHandler(ctx, req, sender)
 	default:
 		logger.Warn("Unknown resource path", "path", req.Path, "method", req.Method)
 		return sender.Send(&backend.CallResourceResponse{
@@ -3106,77 +3116,6 @@ func (d *Datasource) VariableTagValuesHandler(ctx context.Context, req *backend.
 			})
 		}
 
-		tagKeyLower := strings.ToLower(tagValuesReq.TagKey)
-
-		// Check for specific endpoints (Cloud Cost Tags and Teams)
-		if tagKeyLower == "team" || isCloudCostTag(tagKeyLower) {
-			logger.Debug("Intercepting specific API variable query", "tagKey", tagKeyLower)
-
-			site := "datadoghq.com"
-			if d.JSONData != nil && d.JSONData.Site != "" {
-				site = d.JSONData.Site
-			}
-
-			apiKey := d.SecureJSONData["apiKey"]
-			appKey := d.SecureJSONData["appKey"]
-
-			var tagValues []string
-
-			if tagKeyLower == "team" {
-				urlStr := fmt.Sprintf("https://api.%s/api/v2/team", site)
-				bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
-				if err != nil {
-					logger.Error("Failed to fetch teams API", "error", err)
-				} else {
-					var teamResp TeamsResponse
-					if err := json.Unmarshal(bodyBytes, &teamResp); err == nil {
-						for _, item := range teamResp.Data {
-							if item.Attributes.Handle != "" {
-								tagValues = append(tagValues, item.Attributes.Handle)
-							} else if item.Attributes.Name != "" {
-								tagValues = append(tagValues, item.Attributes.Name)
-							}
-						}
-					}
-				}
-			} else {
-				urlStr := fmt.Sprintf("https://api.%s/api/v2/cost/tags?filter[match]=%s", site, url.QueryEscape(tagKeyLower))
-				bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
-				if err != nil {
-					logger.Error("Failed to fetch cost tags API", "error", err)
-				} else {
-					var costResp CostTagsResponse
-					if err := json.Unmarshal(bodyBytes, &costResp); err == nil {
-						for _, item := range costResp.Data {
-							val := item.Attributes.Value
-							// Strip prefix "tagKey:" if present
-							prefix := tagKeyLower + ":"
-							if strings.HasPrefix(strings.ToLower(val), prefix) {
-								val = val[len(prefix):]
-								tagValues = append(tagValues, val)
-							}
-						}
-					}
-				}
-			}
-
-			// Sort results
-			sort.Strings(tagValues)
-
-			// Cache and return
-			d.SetCachedEntry(cacheKey, tagValues)
-
-			duration := time.Since(startTime)
-			logVariableResponse(logger, traceID, "/resources/tag-values", 200, duration, len(tagValues), nil)
-
-			response := VariableResponse{Values: tagValues}
-			respData, _ := json.Marshal(response)
-			return sender.Send(&backend.CallResourceResponse{
-				Status: 200,
-				Body:   respData,
-			})
-		}
-
 		// Acquire semaphore slot (max 5 concurrent requests)
 
 		// Setup Datadog API client
@@ -3824,6 +3763,201 @@ func (d *Datasource) VariableAllTagsHandler(ctx context.Context, req *backend.Ca
 	response := VariableResponse{Values: result}
 	respData, _ := json.Marshal(response)
 
+	return sender.Send(&backend.CallResourceResponse{
+		Status: 200,
+		Body:   respData,
+	})
+}
+
+// VariableTeamsHandler handles POST /resources/teams requests
+func (d *Datasource) VariableTeamsHandler(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
+	logger := log.New()
+	traceID := generateTraceID()
+	startTime := time.Now()
+
+	logger.Debug("VariableTeamsHandler called", "traceID", traceID)
+
+	cacheKey := "var-teams"
+	ttl := 5 * time.Minute
+	if cached := d.GetCachedEntry(cacheKey, ttl); cached != nil {
+		duration := time.Since(startTime)
+		logVariableResponse(logger, traceID, "/resources/teams", 200, duration, len(cached.Data), nil)
+
+		response := VariableResponse{Values: cached.Data}
+		respData, _ := json.Marshal(response)
+		return sender.Send(&backend.CallResourceResponse{
+			Status: 200,
+			Body:   respData,
+		})
+	}
+
+	if err := validateAPICredentials(logger, traceID, d.SecureJSONData); err != nil {
+		duration := time.Since(startTime)
+		logVariableResponse(logger, traceID, "/resources/teams", 401, duration, 0, err)
+		return sender.Send(&backend.CallResourceResponse{
+			Status: 401,
+			Body:   []byte(`{"error": "Invalid Datadog API credentials"}`),
+		})
+	}
+
+	site := "datadoghq.com"
+	if d.JSONData != nil && d.JSONData.Site != "" {
+		site = d.JSONData.Site
+	}
+
+	apiKey := d.SecureJSONData["apiKey"]
+	appKey := d.SecureJSONData["appKey"]
+
+	var tagValues []string
+
+	urlStr := fmt.Sprintf("https://api.%s/api/v2/team?page[size]=100", site)
+	for urlStr != "" {
+		bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
+		if err != nil {
+			logger.Error("Failed to fetch teams API", "error", err, "traceID", traceID)
+			break
+		}
+
+		var teamResp TeamsResponse
+		if err := json.Unmarshal(bodyBytes, &teamResp); err == nil {
+			for _, item := range teamResp.Data {
+				if item.Attributes.Handle != "" {
+					tagValues = append(tagValues, item.Attributes.Handle)
+				} else if item.Attributes.Name != "" {
+					tagValues = append(tagValues, item.Attributes.Name)
+				}
+			}
+
+			var generic map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &generic); err == nil {
+				nextUrl := ""
+				if links, ok := generic["links"].(map[string]interface{}); ok {
+					if next, ok := links["next"].(string); ok {
+						nextUrl = next
+					}
+				}
+				urlStr = nextUrl
+			} else {
+				urlStr = ""
+			}
+		} else {
+			break
+		}
+	}
+
+	sort.Strings(tagValues)
+	d.SetCachedEntry(cacheKey, tagValues)
+
+	duration := time.Since(startTime)
+	logVariableResponse(logger, traceID, "/resources/teams", 200, duration, len(tagValues), nil)
+
+	response := VariableResponse{Values: tagValues}
+	respData, _ := json.Marshal(response)
+	return sender.Send(&backend.CallResourceResponse{
+		Status: 200,
+		Body:   respData,
+	})
+}
+
+// VariableCostTagValuesHandler handles POST /resources/cost-tag-values requests
+func (d *Datasource) VariableCostTagValuesHandler(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
+	logger := log.New()
+	traceID := generateTraceID()
+	startTime := time.Now()
+
+	var tagValuesReq TagValuesRequest
+	if err := validateVariableRequest(logger, traceID, req.Body, &tagValuesReq); err != nil {
+		return sender.Send(&backend.CallResourceResponse{
+			Status: 400,
+			Body:   []byte(`{"error": "Invalid request format"}`),
+		})
+	}
+
+	logger.Debug("VariableCostTagValuesHandler called", "traceID", traceID, "tagKey", tagValuesReq.TagKey)
+
+	cacheKey := fmt.Sprintf("var-cost-tag-values:%s", tagValuesReq.TagKey)
+	ttl := 5 * time.Minute
+	if cached := d.GetCachedEntry(cacheKey, ttl); cached != nil {
+		duration := time.Since(startTime)
+		logVariableResponse(logger, traceID, "/resources/cost-tag-values", 200, duration, len(cached.Data), nil)
+
+		response := VariableResponse{Values: cached.Data}
+		respData, _ := json.Marshal(response)
+		return sender.Send(&backend.CallResourceResponse{
+			Status: 200,
+			Body:   respData,
+		})
+	}
+
+	if err := validateAPICredentials(logger, traceID, d.SecureJSONData); err != nil {
+		return sender.Send(&backend.CallResourceResponse{
+			Status: 401,
+			Body:   []byte(`{"error": "Invalid Datadog API credentials"}`),
+		})
+	}
+
+	site := "datadoghq.com"
+	if d.JSONData != nil && d.JSONData.Site != "" {
+		site = d.JSONData.Site
+	}
+
+	apiKey := d.SecureJSONData["apiKey"]
+	appKey := d.SecureJSONData["appKey"]
+
+	var tagValues []string
+	tagKeyLower := strings.ToLower(tagValuesReq.TagKey)
+
+	urlStr := fmt.Sprintf("https://api.%s/api/v2/cost/tags?filter[match]=%s", site, url.QueryEscape(tagKeyLower))
+
+	for urlStr != "" {
+		bodyBytes, err := d.makeDatadogAPIRequest(ctx, "GET", urlStr, nil, apiKey, appKey)
+		if err != nil {
+			logger.Error("Failed to fetch cost tags API", "error", err, "traceID", traceID)
+			break
+		}
+
+		bodyPreview := string(bodyBytes)
+		if len(bodyPreview) > 200 {
+			bodyPreview = bodyPreview[:200]
+		}
+		logger.Debug("Cost Tags API Response", "traceID", traceID, "bodyPreview", bodyPreview)
+
+		var costResp CostTagsResponse
+		if err := json.Unmarshal(bodyBytes, &costResp); err == nil {
+			for _, item := range costResp.Data {
+				val := item.Attributes.Value
+				// Exact match on the tag key (the substring before the first ':')
+				parts := strings.SplitN(val, ":", 2)
+				if len(parts) == 2 && strings.ToLower(parts[0]) == tagKeyLower {
+					tagValues = append(tagValues, parts[1])
+				}
+			}
+
+			var generic map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &generic); err == nil {
+				nextUrl := ""
+				if links, ok := generic["links"].(map[string]interface{}); ok {
+					if next, ok := links["next"].(string); ok {
+						nextUrl = next
+					}
+				}
+				urlStr = nextUrl
+			} else {
+				urlStr = ""
+			}
+		} else {
+			break
+		}
+	}
+
+	sort.Strings(tagValues)
+	d.SetCachedEntry(cacheKey, tagValues)
+
+	duration := time.Since(startTime)
+	logVariableResponse(logger, traceID, "/resources/cost-tag-values", 200, duration, len(tagValues), nil)
+
+	response := VariableResponse{Values: tagValues}
+	respData, _ := json.Marshal(response)
 	return sender.Send(&backend.CallResourceResponse{
 		Status: 200,
 		Body:   respData,
