@@ -413,7 +413,6 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           break;
 
         case 'tag_keys':
-          resourcePath = 'tag-keys';
           // Convert metricName to '*' if empty, otherwise use as-is
           params.metricName = validateAndConvertField(query.metricName);
           // Use tagKey as filter pattern for tag keys (supports both autocomplete and regex)
@@ -423,7 +422,6 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           break;
 
         case 'tag_values':
-          resourcePath = 'tag-values';
           // Convert fields to '*' if empty, otherwise use as-is
           params.metricName = validateAndConvertField(query.metricName);
           params.tagKey = validateAndConvertField(query.tagKey);

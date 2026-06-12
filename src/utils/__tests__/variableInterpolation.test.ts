@@ -1,11 +1,12 @@
 import { VariableInterpolationService } from '../variableInterpolation';
 import { MyQuery } from '../../types';
 import { ScopedVars } from '@grafana/data';
-import { getTemplateSrv } from '@grafana/runtime';
+import { getTemplateSrv, logWarning } from '@grafana/runtime';
 
 // Mock the template service
 jest.mock('@grafana/runtime', () => ({
   getTemplateSrv: jest.fn(),
+  logWarning: jest.fn(),
 }));
 
 const mockTemplateSrv = {
@@ -398,63 +399,7 @@ describe('VariableInterpolationService', () => {
     });
   });
 
-  describe('custom format interpolation', () => {
-    beforeEach(() => {
-      mockTemplateSrv.replace.mockImplementation((text: string) => text);
-      mockTemplateSrv.getVariables.mockReturnValue([
-        {
-          name: 'service',
-          current: { value: ['web', 'api', 'worker'] },
-        },
-        {
-          name: 'env',
-          current: { value: 'prod' },
-        },
-      ]);
-    });
 
-    it('should handle custom format specifiers in interpolation', () => {
-      const query: MyQuery = {
-        refId: 'A',
-        queryText: 'metric{service:${service:pipe}}',
-        legendMode: 'custom',
-        legendTemplate: 'Services: ${service:pipe}',
-      };
-
-      const result = service.interpolateQuery(query, {});
-
-      expect(result.queryText).toBe('metric{service:web|api|worker}');
-      expect(result.legendTemplate).toBe('Services: web|api|worker');
-    });
-
-    it('should handle multiple custom format specifiers', () => {
-      const query: MyQuery = {
-        refId: 'A',
-        queryText: 'metric{service:${service:csv},env:${env:raw}}',
-        legendMode: 'custom',
-        legendTemplate: 'Services: ${service:csv}, Env: ${env:raw}',
-      };
-
-      const result = service.interpolateQuery(query, {});
-
-      expect(result.queryText).toBe('metric{service:web,api,worker,env:prod}');
-      expect(result.legendTemplate).toBe('Services: web,api,worker, Env: prod');
-    });
-
-    it('should fallback to original text if variable not found', () => {
-      const query: MyQuery = {
-        refId: 'A',
-        queryText: 'metric{service:${unknown:csv}}',
-        legendMode: 'custom',
-        legendTemplate: 'Unknown: ${unknown:csv}',
-      };
-
-      const result = service.interpolateQuery(query, {});
-
-      expect(result.queryText).toBe('metric{service:${unknown:csv}}');
-      expect(result.legendTemplate).toBe('Unknown: ${unknown:csv}');
-    });
-  });
 
   describe('metrics query interpolation (Datadog-native syntax)', () => {
     beforeEach(() => {
@@ -467,7 +412,9 @@ describe('VariableInterpolationService', () => {
           team: { value: ['*'] },
           empty_var: { value: [] },
           spaced: { value: ['foo bar', 'baz'] },
-          malicious: { value: ['drop me!', 'valid_val'] }
+          malicious: { value: ['drop me!', 'valid_val'] },
+          all_dropped: { value: ['drop me!', 'bad val'] },
+          wildcard_val: { value: ['web-*'] }
         };
 
         result = result.replace(/\$\{([a-zA-Z0-9_]+)\}|\$([a-zA-Z0-9_]+)/g, (match, v1, v2) => {
@@ -512,6 +459,16 @@ describe('VariableInterpolationService', () => {
       expect(result.queryText).toBe('sum:datadog.cost.amortized{team:*}');
     });
 
+    it('should allow wildcard values through the sanitizer', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{service:$wildcard_val}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{service:web-*}');
+    });
+
     it('should handle empty selections gracefully', () => {
       const query: MyQuery = {
         refId: 'A',
@@ -522,8 +479,27 @@ describe('VariableInterpolationService', () => {
       expect(result.queryText).toBe('sum:datadog.cost.amortized{empty:*}');
     });
 
+    it('should drop malicious values but keep valid ones', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{mixed:$malicious}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{mixed:valid_val}');
+    });
+
+    it('should fail closed (empty string) if all values are dropped by sanitizer', () => {
+      const query: MyQuery = {
+        refId: 'A',
+        queryText: 'sum:datadog.cost.amortized{bad:$all_dropped}',
+      };
+
+      const result = service.interpolateQuery(query, {});
+      expect(result.queryText).toBe('sum:datadog.cost.amortized{bad:}');
+    });
+
     it('should drop unrepresentable characters in metric scopes and log a warning', () => {
-      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const query: MyQuery = {
         refId: 'A',
         queryText: 'sum:datadog.cost.amortized{malicious:$malicious}',
@@ -531,8 +507,7 @@ describe('VariableInterpolationService', () => {
 
       const result = service.interpolateQuery(query, {});
       expect(result.queryText).toBe('sum:datadog.cost.amortized{malicious:valid_val}');
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Dropping unrepresentable metric scope value'));
-      warnSpy.mockRestore();
+      expect(logWarning).toHaveBeenCalledWith(expect.stringContaining('Dropping unrepresentable metric scope value'));
     });
 
     it('should not affect variables used without keys (e.g. in grouping)', () => {

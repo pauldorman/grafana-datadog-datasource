@@ -1,4 +1,4 @@
-import { getTemplateSrv } from '@grafana/runtime';
+import { getTemplateSrv, logWarning } from '@grafana/runtime';
 import { ScopedVars } from '@grafana/data';
 import { MyQuery, VariableFormat, VariableInterpolationContext } from '../types';
 
@@ -186,8 +186,8 @@ export class VariableInterpolationService {
   private sanitizeMetricValue(value: string): string {
     // Only pass through values matching safe charset
     // If it contains unrepresentable chars, log a warning and return empty string to drop it
-    if (!/^[a-zA-Z0-9_\-./:]+$/.test(value)) {
-      console.warn(`Datadog Datasource: Dropping unrepresentable metric scope value: "${value}". Metric scopes only support alphanumeric characters, underscores, hyphens, periods, slashes, and colons.`);
+    if (!/^[a-zA-Z0-9_\-./:*]+$/.test(value)) {
+      logWarning(`Datadog Datasource: Dropping unrepresentable metric scope value: "${value}". Metric scopes only support alphanumeric characters, underscores, hyphens, periods, slashes, colons, and asterisks.`);
       return '';
     }
     return value;
@@ -217,16 +217,6 @@ export class VariableInterpolationService {
     }
 
     try {
-      // Handle custom format specifiers like ${variable:format} manually for backward compatibility
-      let preprocessedQueryText = queryText.replace(/\$\{([^}:]+):([^}]+)\}/g, (match, varName, format) => {
-        const variable = scopedVars[varName] || this.templateSrv.getVariables().find(v => v.name === varName);
-        if (!variable) {
-          return match;
-        }
-        const context = this.createInterpolationContext(variable, format as VariableFormat);
-        return this.formatMultiValue(context.values, context.format || 'csv');
-      });
-
       // Use Grafana's built-in replace with a custom format function
       // This correctly handles $__all (by resolving it to allValue before format runs), repeat panels, and scopedVars natively.
       const datadogFormat = (value: string | string[], variable: any) => {
@@ -243,7 +233,7 @@ export class VariableInterpolationService {
           .filter(v => v !== '');
 
         if (sanitized.length === 0) {
-          return '*'; // Fallback to wildcard if all values were dropped
+          return ''; // Fail closed if all values were dropped
         }
 
         if (sanitized.length === 1) {
@@ -254,7 +244,7 @@ export class VariableInterpolationService {
         return `__IN__(${sanitized.join(', ')})`;
       };
 
-      let replaced = this.templateSrv.replace(preprocessedQueryText, scopedVars, datadogFormat);
+      let replaced = this.templateSrv.replace(queryText, scopedVars, datadogFormat);
 
       // Rewrite Datadog native multi-select: key:__IN__(a, b) -> key IN (a, b)
       replaced = replaced.replace(/([a-zA-Z0-9_.\-\/]+):__IN__\(([^)]+)\)/g, '$1 IN ($2)');
