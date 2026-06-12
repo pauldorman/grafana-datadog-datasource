@@ -52,6 +52,18 @@ tag_values(system.cpu.user, service, env:$environment)
 ```
 Returns services filtered by the selected environment.
 
+#### Cloud Cost Tags
+```
+cost_tag_values(datadog_product)
+```
+Returns all available values for a specific Cloud Cost tag, such as `datadog_product`.
+
+#### Teams
+```
+teams()
+```
+Returns all Datadog Teams in your organization.
+
 ### 3. Variable Options
 
 - **Multi-value**: Allow selecting multiple values
